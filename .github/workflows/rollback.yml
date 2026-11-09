@@ -1,0 +1,76 @@
+# ============================================================
+# BÀI 5 - Workflow ROLLBACK: quay về một bản cũ bằng tay.
+#
+# Vì mọi image trên GHCR đều có tag theo SHA của commit, quay về bản cũ
+# chỉ là "deploy lại image của SHA cũ". Không cần build lại gì cả.
+# Lưu ý: chỉ rollback được về commit đã từng build và đẩy image lên GHCR
+# (tức commit đã push lên main và pipeline đã xanh đến bước build).
+# ============================================================
+name: Rollback
+
+# workflow_dispatch = KHÔNG chạy tự động. Bạn bấm "Run workflow" ở tab Actions
+# và nhập SHA cần quay về vào ô "sha".
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "SHA đầy đủ (40 ký tự) của commit cần quay về"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    # Chạy trên runner của bạn, vì container nằm trên máy bạn (giống job deploy).
+    runs-on: self-hosted
+
+    # Dùng chung environment "staging" với job deploy => cùng bị chặn chờ duyệt
+    # nếu bạn bật Required reviewers.
+    environment: staging
+
+    # Dùng chung nhóm với job deploy: rollback và deploy không bao giờ chạy chồng nhau.
+    concurrency:
+      group: deploy-local
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        shell: powershell
+
+    # Giá trị người dùng nhập đi qua BIẾN MÔI TRƯỜNG, không chèn thẳng vào lệnh.
+    # Nếu chèn ${{ inputs.sha }} vào lệnh, kẻ nhập chuỗi độc hại có thể chạy lệnh tùy ý.
+    env:
+      TARGET_SHA: ${{ inputs.sha }}
+
+    steps:
+      - name: Rollback container
+        run: |
+          # Chỉ chấp nhận đúng 40 ký tự hex (SHA đầy đủ), còn lại thì dừng ngay.
+          if ($env:TARGET_SHA -notmatch '^[0-9a-f]{40}$') {
+            Write-Error "SHA phai la 40 ky tu hex chu thuong"
+            exit 1
+          }
+
+          $image = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLower()):$($env:TARGET_SHA)"
+
+          # Kéo image của bản cũ. Không có image này trên GHCR thì dừng tại đây.
+          docker pull $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # Xóa container hiện tại (nếu có) rồi chạy container từ image bản cũ.
+          $old = docker ps -aq --filter "name=^site$"
+          if ($old) {
+            docker rm -f site
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          docker run -d --name site --restart unless-stopped -p 8080:80 $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      # Kiểm tra trang chạy, và in dòng "Phiên bản" ra log để thấy đang là bản nào.
+      - name: Kiểm tra sau rollback
+        run: |
+          Start-Sleep -Seconds 3
+          curl.exe -fsS http://localhost:8080/ -o out.html
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Select-String -Path out.html -Pattern "<p>" -Encoding utf8

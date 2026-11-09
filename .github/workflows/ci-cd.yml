@@ -143,6 +143,10 @@ jobs:
     # self-hosted = chạy trên runner do bạn tự cài, không phải máy ảo của GitHub.
     runs-on: self-hosted
 
+    # BÀI 5: environment "staging". Chưa bật duyệt tay thì job vẫn chạy bình thường.
+    # Bật Settings > Environments > staging > Required reviewers thì job sẽ DỪNG chờ bạn bấm duyệt.
+    environment: staging
+
     # Không để 2 lần deploy chạy chồng nhau.
     # cancel-in-progress: false = lần sau CHỜ lần trước xong, không hủy giữa chừng.
     concurrency:
