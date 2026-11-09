@@ -124,3 +124,61 @@ jobs:
           docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
           docker push "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:latest"
+
+  # ==========================================================
+  # BÀI 4 - job "deploy": tự động hóa đúng những gì đã làm tay ở Bài 3
+  # (scripts/manual-deploy.sh). Đây là phần CD (Continuous Deployment).
+  # ==========================================================
+  deploy:
+    # Chỉ chạy khi build xanh (image đã nằm trên GHCR).
+    needs: build
+    # Chỉ deploy khi push lên main. Pull Request chỉ chạy check + build.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    # Job này đọc secrets/variables của environment "coder-staging"
+    # (CODER_URL, CODER_SESSION_TOKEN, CODER_WORKSPACE đã tạo trên GitHub).
+    # Job khác không khai báo environment này thì KHÔNG đọc được secrets đó.
+    environment: coder-staging
+
+    # Không để 2 lần deploy chạy chồng nhau.
+    # cancel-in-progress: false = lần sau CHỜ lần trước xong, không hủy giữa chừng.
+    concurrency:
+      group: deploy-coder
+      cancel-in-progress: false
+
+    # Coder CLI tự đọc 2 biến CODER_URL và CODER_SESSION_TOKEN để đăng nhập,
+    # nên không cần chạy "coder login".
+    env:
+      CODER_URL: ${{ secrets.CODER_URL }}
+      CODER_SESSION_TOKEN: ${{ secrets.CODER_SESSION_TOKEN }}
+      WORKSPACE: ${{ vars.CODER_WORKSPACE }}
+
+    steps:
+      # Job mới = máy ảo mới: không có code, nên KHÔNG cần checkout
+      # (deploy chỉ cần tên image, image đã có sẵn trên GHCR).
+
+      - name: Đặt tên image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # Cài Coder CLI từ chính server Coder của bạn => luôn đúng phiên bản server.
+      # (CLI lệch phiên bản server thì nhiều lệnh báo lỗi "version mismatch".)
+      - name: Cài Coder CLI (khớp phiên bản server)
+        run: curl -fsSL "$CODER_URL/install.sh" | sh
+
+      # Vào workspace, kéo image đúng SHA của commit vừa build, thay container cũ.
+      # --wait=yes : chờ workspace khởi động xong rồi mới chạy lệnh.
+      # Image đã public nên không cần docker login.
+      # "docker rm -f site || true" : xóa container cũ, không lỗi nếu chưa có.
+      - name: Deploy vào workspace
+        run: |
+          coder ssh --wait=yes "$WORKSPACE" \
+            "docker pull $IMAGE:${{ github.sha }} && (docker rm -f site || true) && docker run -d --name site --restart unless-stopped -p 8080:80 $IMAGE:${{ github.sha }}"
+
+      # Kiểm tra SAU deploy: pipeline xanh phải nghĩa là trang thật sự đang chạy,
+      # không chỉ là lệnh deploy không báo lỗi.
+      - name: Kiểm tra sau deploy
+        run: |
+          sleep 3
+          coder ssh "$WORKSPACE" \
+            "curl -fsS http://localhost:8080/ -o /tmp/out.html && grep -q 'Xin chào CI/CD' /tmp/out.html"
