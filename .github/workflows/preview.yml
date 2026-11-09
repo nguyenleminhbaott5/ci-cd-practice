@@ -1,0 +1,121 @@
+# ============================================================
+# BÀI 6 - PREVIEW THEO TỪNG PULL REQUEST.
+#
+# Ý tưởng: mỗi PR có một container tạm chạy bản của riêng PR đó, để bạn mở
+# xem thử TRƯỚC khi merge. PR đóng thì container bị xóa.
+#
+# Bản gốc của bài dùng workspace Coder. Ở đây "server preview" là máy của bạn:
+#   - PR số N  ->  container "site-pr-N"  ->  http://localhost:(8000+N)
+#   - Ví dụ PR #3 xem ở http://localhost:8003
+# ============================================================
+name: Preview
+
+# Chạy khi PR được mở, có commit mới, mở lại, hoặc đóng (merge cũng tính là đóng).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------
+  # 1) Build image của PR và đẩy lên GHCR với tag "pr-<số>".
+  #    Chạy trên máy ảo GitHub (an toàn), KHÔNG chạy trên máy bạn.
+  # ----------------------------------------------------------
+  build-preview:
+    # Chỉ khi PR đang mở, và PR đến từ NHÁNH TRONG CÙNG REPO (không phải fork).
+    # PR từ fork không được đọc secrets/đẩy package, và không đáng tin để chạy.
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # quyền đẩy image lên GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tên image phải chữ thường. Tag riêng cho PR để không đè lên "latest".
+      - name: Đặt tên image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:pr-${{ github.event.number }}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+
+      - name: Đăng nhập GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Đẩy image
+        run: docker push "$IMAGE"
+
+  # ----------------------------------------------------------
+  # 2) Chạy container preview trên máy bạn (self-hosted runner).
+  #    Job này KHÔNG checkout code của PR, chỉ kéo image đã build xong.
+  # ----------------------------------------------------------
+  run-preview:
+    needs: build-preview
+    runs-on: self-hosted
+    # Mỗi PR một nhóm riêng: preview của PR này không chờ PR khác.
+    # Push liên tiếp vào cùng PR thì lần cũ bị hủy, chỉ giữ lần mới nhất.
+    concurrency:
+      group: preview-pr-${{ github.event.number }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: powershell
+    # Số PR là SỐ NGUYÊN do GitHub cấp nên an toàn để đưa vào biến môi trường.
+    env:
+      PR_NUMBER: ${{ github.event.number }}
+    steps:
+      - name: Chạy container preview
+        run: |
+          $image = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLower()):pr-$($env:PR_NUMBER)"
+          $name  = "site-pr-$($env:PR_NUMBER)"
+          $port  = 8000 + [int]$env:PR_NUMBER
+
+          docker pull $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # Xóa container preview cũ của PR này (nếu có) rồi chạy bản mới.
+          $old = docker ps -aq --filter "name=^$name$"
+          if ($old) {
+            docker rm -f $name
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          docker run -d --name $name -p "${port}:80" $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # In đường dẫn xem thử ra log và ra trang tóm tắt của lần chạy.
+          $url = "http://localhost:$port"
+          Write-Host "Preview: $url"
+          "Preview PR #$($env:PR_NUMBER): $url (chi mo duoc tren may chay runner)" |
+            Out-File -Append -Encoding ascii $env:GITHUB_STEP_SUMMARY
+
+  # ----------------------------------------------------------
+  # 3) Dọn dẹp: khi PR đóng (hoặc merge) thì xóa container preview của nó.
+  #    Không dọn thì container tích tụ mãi trên máy bạn.
+  # ----------------------------------------------------------
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: powershell
+    env:
+      PR_NUMBER: ${{ github.event.number }}
+    steps:
+      - name: Xóa container preview
+        run: |
+          $name = "site-pr-$($env:PR_NUMBER)"
+          $old = docker ps -aq --filter "name=^$name$"
+          if ($old) {
+            docker rm -f $name
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "Khong co container $name de xoa"
+          }
