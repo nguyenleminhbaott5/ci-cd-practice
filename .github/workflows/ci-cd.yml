@@ -125,60 +125,70 @@ jobs:
           docker push "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:latest"
 
+
   # ==========================================================
-  # BÀI 4 - job "deploy": tự động hóa đúng những gì đã làm tay ở Bài 3
-  # (scripts/manual-deploy.sh). Đây là phần CD (Continuous Deployment).
+  # BÀI 4 - job "deploy": tự động chạy container mới sau khi build xong.
+  # Đây là phần CD (Continuous Deployment).
+  #
+  # Job này chạy trên SELF-HOSTED RUNNER = một chương trình chạy ngay trên máy
+  # của bạn (Windows + Docker Desktop). Runner chỉ kết nối RA GitHub để nhận việc,
+  # nên không cần mở cổng vào máy, không cần IP công khai, không cần ngrok.
+  # "Máy của bạn" chính là server nhận deploy (thay cho workspace Coder).
   # ==========================================================
   deploy:
     # Chỉ chạy khi build xanh (image đã nằm trên GHCR).
     needs: build
-    # Chỉ deploy khi push lên main. Pull Request chỉ chạy check + build.
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    # Job này đọc secrets/variables của environment "coder-staging"
-    # (CODER_URL, CODER_SESSION_TOKEN, CODER_WORKSPACE đã tạo trên GitHub).
-    # Job khác không khai báo environment này thì KHÔNG đọc được secrets đó.
-    environment: coder-staging
+    # Chỉ deploy khi PUSH lên main. Pull Request tuyệt đối không được chạm vào máy bạn.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # self-hosted = chạy trên runner do bạn tự cài, không phải máy ảo của GitHub.
+    runs-on: self-hosted
 
     # Không để 2 lần deploy chạy chồng nhau.
     # cancel-in-progress: false = lần sau CHỜ lần trước xong, không hủy giữa chừng.
     concurrency:
-      group: deploy-coder
+      group: deploy-local
       cancel-in-progress: false
 
-    # Coder CLI tự đọc 2 biến CODER_URL và CODER_SESSION_TOKEN để đăng nhập,
-    # nên không cần chạy "coder login".
-    env:
-      CODER_URL: ${{ secrets.CODER_URL }}
-      CODER_SESSION_TOKEN: ${{ secrets.CODER_SESSION_TOKEN }}
-      WORKSPACE: ${{ vars.CODER_WORKSPACE }}
+    # Runner Windows: dùng PowerShell. Lưu ý PowerShell chỉ coi step là lỗi dựa vào
+    # lệnh CUỐI CÙNG, nên sau mỗi lệnh docker phải tự kiểm tra $LASTEXITCODE.
+    defaults:
+      run:
+        shell: powershell
 
     steps:
-      # Job mới = máy ảo mới: không có code, nên KHÔNG cần checkout
-      # (deploy chỉ cần tên image, image đã có sẵn trên GHCR).
+      # Không cần checkout: deploy chỉ cần tên image, image đã có sẵn trên GHCR.
 
-      - name: Đặt tên image
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
-      # Cài Coder CLI từ chính server Coder của bạn => luôn đúng phiên bản server.
-      # (CLI lệch phiên bản server thì nhiều lệnh báo lỗi "version mismatch".)
-      - name: Cài Coder CLI (khớp phiên bản server)
-        run: curl -fsSL "$CODER_URL/install.sh" | sh
-
-      # Vào workspace, kéo image đúng SHA của commit vừa build, thay container cũ.
-      # --wait=yes : chờ workspace khởi động xong rồi mới chạy lệnh.
+      # Kéo image đúng SHA của commit vừa build, thay container cũ bằng container mới.
       # Image đã public nên không cần docker login.
-      # "docker rm -f site || true" : xóa container cũ, không lỗi nếu chưa có.
-      - name: Deploy vào workspace
+      - name: Deploy container
         run: |
-          coder ssh --wait=yes "$WORKSPACE" \
-            "docker pull $IMAGE:${{ github.sha }} && (docker rm -f site || true) && docker run -d --name site --restart unless-stopped -p 8080:80 $IMAGE:${{ github.sha }}"
+          # Tên image bắt buộc chữ thường (ToLower), tag theo SHA của commit.
+          $image = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLower()):${{ github.sha }}"
 
-      # Kiểm tra SAU deploy: pipeline xanh phải nghĩa là trang thật sự đang chạy,
-      # không chỉ là lệnh deploy không báo lỗi.
+          docker pull $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # Xóa container cũ tên "site" nếu có (không lỗi nếu chưa có).
+          $old = docker ps -aq --filter "name=^site$"
+          if ($old) {
+            docker rm -f site
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+
+          # Chạy container mới: map cổng 8080 của máy bạn -> cổng 80 của container.
+          # --restart unless-stopped: Docker tự bật lại container khi khởi động lại.
+          docker run -d --name site --restart unless-stopped -p 8080:80 $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      # Kiểm tra SAU deploy: pipeline xanh phải nghĩa là trang thật sự đang chạy.
       - name: Kiểm tra sau deploy
         run: |
-          sleep 3
-          coder ssh "$WORKSPACE" \
-            "curl -fsS http://localhost:8080/ -o /tmp/out.html && grep -q 'Xin chào CI/CD' /tmp/out.html"
+          Start-Sleep -Seconds 3
+          # curl.exe (có sẵn trên Windows) ghi trang ra file.
+          curl.exe -fsS http://localhost:8080/ -o out.html
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # "ch.+" khớp chữ "chào" dù PowerShell đọc tiếng Việt kiểu gì.
+          if (-not (Select-String -Path out.html -Pattern "Xin ch.+ CI/CD" -Encoding utf8 -Quiet)) {
+            Write-Error "Trang không chứa nội dung mong đợi"
+            exit 1
+          }
