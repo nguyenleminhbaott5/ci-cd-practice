@@ -58,3 +58,69 @@ jobs:
       # Có lỗi HTML => lệnh thoát mã khác 0 => job đỏ.
       - name: Validate HTML
         run: npx --yes html-validate "*.html"
+
+  # ==========================================================
+  # BÀI 2 - job "build": đóng gói Docker image, test thử, đẩy lên GHCR.
+  # GHCR = GitHub Container Registry, "kho" lưu image của GitHub.
+  # ==========================================================
+  build:
+    # needs = chạy SAU job check và chỉ khi check xanh.
+    # Check đỏ => build bị bỏ qua, code lỗi không bao giờ được đóng gói.
+    needs: check
+    runs-on: ubuntu-latest
+
+    # Quyền riêng của job này (ghi đè khối permissions ở trên).
+    # packages: write = được đẩy image lên GHCR. Chỉ job build cần quyền này.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # Job mới = máy ảo mới và rỗng => phải checkout lại code.
+      - uses: actions/checkout@v4
+
+      # Đặt biến môi trường IMAGE dùng cho các step sau.
+      # ${GITHUB_REPOSITORY,,} = "owner/repo" chuyển hết sang chữ THƯỜNG
+      # (Docker từ chối tên image có chữ hoa).
+      # Ghi vào $GITHUB_ENV thì các step sau mới đọc được biến này.
+      - name: Đặt tên image (bắt buộc chữ thường)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # Build image từ Dockerfile ở thư mục gốc (dấu "." ở cuối).
+      # Tag = github.sha (mã commit): mỗi commit có 1 image riêng,
+      # biết chính xác bản nào đang chạy và rollback được về SHA cũ.
+      - name: Build image
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+
+      # Smoke test: chạy thử container và gọi trang chủ.
+      # Build thành công chưa chắc trang chạy đúng (thiếu file, sai đường dẫn...).
+      - name: Smoke test
+        run: |
+          # -d chạy nền; map cổng 8080 của máy ảo -> cổng 80 của container
+          docker run -d --name site -p 8080:80 "$IMAGE:${{ github.sha }}"
+          # chờ vài giây cho nginx khởi động
+          sleep 3
+          # -f: HTTP lỗi (404, 500...) thì curl thoát mã khác 0 => step đỏ
+          # ghi ra file rồi mới grep (tránh lỗi exit 23 khi pipe curl | grep -q)
+          curl -fsS http://localhost:8080/ -o out.html
+          # kiểm tra trang có đúng nội dung mong đợi, không thì step đỏ
+          grep -q "Xin chào CI/CD" out.html
+
+      # Chỉ đăng nhập + đẩy image khi push lên main.
+      # Pull Request vẫn build và test, nhưng không làm bẩn registry.
+      - name: Đăng nhập GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}              # người push
+          password: ${{ secrets.GITHUB_TOKEN }}      # token tự cấp, không cần tạo tay
+
+      # Gắn thêm tag "latest" (tiện dùng) rồi đẩy cả 2 tag lên GHCR.
+      # Đừng chỉ dựa vào latest: nó luôn đổi, không biết đang chạy bản nào.
+      - name: Đẩy image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
