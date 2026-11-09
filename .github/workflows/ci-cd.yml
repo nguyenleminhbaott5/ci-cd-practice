@@ -1,0 +1,60 @@
+# ============================================================
+# WORKFLOW = 1 file YAML mô tả một quy trình tự động.
+# GitHub tự đọc mọi file trong thư mục .github/workflows/
+# (thư mục này BẮT BUỘC nằm ở gốc repo, đúng tên).
+# ============================================================
+
+# Tên hiển thị ở tab "Actions" trên GitHub (không ảnh hưởng logic).
+name: CI/CD
+
+# ------------------------------------------------------------
+# on = EVENT: khi nào workflow được kích hoạt.
+# ------------------------------------------------------------
+on:
+  push:
+    branches: [main]   # chạy khi có người push lên nhánh main
+  pull_request:        # chạy khi mở/cập nhật Pull Request (mọi nhánh đích)
+                       # -> nhờ vậy code lỗi bị phát hiện TRƯỚC khi merge
+
+# ------------------------------------------------------------
+# permissions: quyền của GITHUB_TOKEN (token GitHub tự cấp cho mỗi lần chạy).
+# "contents: read" = chỉ được đọc code, không được ghi/push gì cả.
+# Nguyên tắc: cấp quyền tối thiểu, cần gì thêm thì khai báo sau.
+# ------------------------------------------------------------
+permissions:
+  contents: read
+
+# ------------------------------------------------------------
+# jobs: danh sách công việc.
+# - Mỗi job chạy trên 1 máy ảo MỚI và SẠCH, xong là bị xóa.
+# - Mặc định các job chạy SONG SONG; muốn chạy lần lượt thì dùng "needs"
+#   (sẽ dùng ở Bài 2: build cần check, deploy cần build).
+# ------------------------------------------------------------
+jobs:
+  # "check" là tên job do mình đặt. Tên này cũng là tên "status check"
+  # mà bạn chọn khi bật branch protection (chặn merge khi đỏ).
+  check:
+    # runs-on = loại máy ảo GitHub cấp cho job này (Ubuntu mới nhất).
+    runs-on: ubuntu-latest
+
+    # steps = các bước, chạy TUẦN TỰ trong cùng 1 máy ảo (thấy file của nhau).
+    # Một step thoát với mã khác 0 => cả job dừng và hiện dấu đỏ.
+    steps:
+      # Step 1 - "uses" = dùng một action viết sẵn của người khác.
+      # actions/checkout tải code repo về máy ảo.
+      # Máy ảo mới tinh và RỖNG, không checkout thì không có index.html để kiểm tra.
+      - uses: actions/checkout@v4
+
+      # Step 2 - cài Node.js, vì công cụ html-validate là gói npm.
+      # "with" = truyền tham số cho action.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Step 3 - "run" = chạy một lệnh shell; "name" chỉ để hiển thị trong log.
+      # npx --yes : tải và chạy html-validate luôn, không hỏi xác nhận.
+      # "*.html"  : kiểm tra mọi file .html ở thư mục gốc.
+      # Luật kiểm tra lấy từ file .htmlvalidate.json.
+      # Có lỗi HTML => lệnh thoát mã khác 0 => job đỏ.
+      - name: Validate HTML
+        run: npx --yes html-validate "*.html"
